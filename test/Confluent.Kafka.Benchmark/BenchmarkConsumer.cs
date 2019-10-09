@@ -17,7 +17,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-
+using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Benchmark
 {
@@ -25,19 +25,24 @@ namespace Confluent.Kafka.Benchmark
     {
         public static void BenchmarkConsumerImpl(string bootstrapServers, string topic, long firstMessageOffset, int nMessages, int nTests, int nHeaders)
         {
+            //create new consumer group id to restart from the beginning
+            var consumerGroupId = $"benchmark-consumer-group-{Guid.NewGuid().ToString()}";
+            List<Task> runningTasks = new List<Task>();
+
             var consumerConfig = new ConsumerConfig
             {
-                GroupId = "benchmark-consumer-group",
+                GroupId = consumerGroupId,
                 BootstrapServers = bootstrapServers,
                 SessionTimeoutMs = 6000,
-                ConsumeResultFields = nHeaders == 0 ? "none" : "headers"
+                ConsumeResultFields = nHeaders == 0 ? "none" : "headers",
+                AutoCommitIntervalMs = 10000,
             };
 
             using (var consumer = new ConsumerBuilder<Ignore, Ignore>(consumerConfig).Build())
             {
-                for (var j=0; j<nTests; j += 1)
+                for (var j = 0; j < nTests; j += 1)
                 {
-                    Console.WriteLine($"{consumer.Name} consuming from {topic}");
+                    Console.WriteLine($"{DateTime.UtcNow} -- Start {consumer.Name}-{consumerGroupId} consuming from {topic}");
 
                     consumer.Assign(new List<TopicPartitionOffset>() { new TopicPartitionOffset(topic, 0, firstMessageOffset) });
 
@@ -47,22 +52,47 @@ namespace Confluent.Kafka.Benchmark
                     long startTime = DateTime.Now.Ticks;
 
                     var cnt = 0;
+                    const int outputMessageAtX = 10000;
+                    int outputCounter = 0;
 
-                    while (cnt < nMessages-1)
+                    while (cnt < nMessages - 1)
                     {
-                        record = consumer.Consume(TimeSpan.FromSeconds(1));
+                        record = consumer.Consume(TimeSpan.FromMilliseconds(500));
                         if (record != null)
                         {
                             cnt += 1;
+                            outputCounter += 1;
+
+                            runningTasks.Add(Task.Run(() =>
+                            {
+                                ProcessRecord(record);
+                            }));
+
+                            if (outputCounter >= outputMessageAtX)
+                            {
+                                Console.WriteLine($"{DateTime.UtcNow} -- At offset {record.Offset} from {topic}. Output every {outputCounter} messages.");
+
+                                outputCounter = 0;
+                            }
                         }
                     }
 
-                    var duration = DateTime.Now.Ticks - startTime;
+                    Task.WhenAll(runningTasks);
 
-                    Console.WriteLine($"Consumed {nMessages-1} messages in {duration/10000.0:F0}ms");
-                    Console.WriteLine($"{(nMessages-1) / (duration/10000.0):F0}k msg/s");
+                    var duration = DateTime.Now.Ticks - startTime;
+                    var msg1 = $"Consumed {cnt} messages in {duration / 10000.0:F0}ms";
+                    var msg2 = $"{(cnt) / (duration / 10000.0):F0}k msg/s";
+                    Console.WriteLine($"{DateTime.UtcNow} -- End {consumer.Name}-{consumerGroupId} consuming from {topic}");
+
+                    Console.WriteLine(msg1);
+                    Console.WriteLine(msg2);
                 }
             }
+        }
+
+        private static bool ProcessRecord(ConsumeResult<Ignore, Ignore> record)
+        {
+            return (record != null);
         }
 
         public static void Consume(string bootstrapServers, string topic, long firstMessageOffset, int nMessages, int nHeaders, int nTests)
